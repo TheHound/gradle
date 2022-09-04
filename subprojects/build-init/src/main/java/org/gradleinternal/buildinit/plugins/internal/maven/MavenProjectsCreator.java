@@ -24,6 +24,8 @@ import org.apache.maven.execution.MavenExecutionRequestPopulationException;
 import org.apache.maven.execution.MavenExecutionRequestPopulator;
 import org.apache.maven.execution.MavenExecutionResult;
 import org.apache.maven.execution.MavenSession;
+import org.apache.maven.model.Model;
+import org.apache.maven.model.io.xpp3.MavenXpp3Reader;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.ProjectBuilder;
 import org.apache.maven.project.ProjectBuildingException;
@@ -38,6 +40,7 @@ import org.codehaus.plexus.PlexusConstants;
 import org.codehaus.plexus.PlexusContainerException;
 import org.codehaus.plexus.classworlds.ClassWorld;
 import org.codehaus.plexus.component.repository.exception.ComponentLookupException;
+import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
 import org.eclipse.aether.DefaultRepositorySystemSession;
 import org.eclipse.aether.RepositorySystemSession;
 import org.gradle.api.artifacts.dsl.RepositoryHandler;
@@ -45,6 +48,8 @@ import org.gradle.internal.SystemProperties;
 import org.gradle.util.internal.CollectionUtils;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Properties;
@@ -63,11 +68,14 @@ public class MavenProjectsCreator {
         }
     }
 
-    private Set<MavenProject> createNow(Settings settings, File pomFile) throws PlexusContainerException, ComponentLookupException, MavenExecutionRequestPopulationException, ProjectBuildingException {
+    private Set<MavenProject> createNow(Settings settings, File pomFile) throws PlexusContainerException, ComponentLookupException, MavenExecutionRequestPopulationException, ProjectBuildingException, IOException, XmlPullParserException {
         ContainerConfiguration containerConfiguration = new DefaultContainerConfiguration()
                 .setClassWorld(new ClassWorld("plexus.core", Thread.currentThread().getContextClassLoader()))
                 .setName("mavenCore").setClassPathScanning(PlexusConstants.SCANNING_INDEX).setAutoWiring(true);
 
+//        MavenXpp3Reader reader = new MavenXpp3Reader();
+//        Model model = reader.read(Files.newBufferedReader(pomFile.toPath()));
+        
         DefaultPlexusContainer container = new DefaultPlexusContainer(containerConfiguration);
         ProjectBuilder builder = container.lookup(ProjectBuilder.class);
         MavenExecutionRequest executionRequest = new DefaultMavenExecutionRequest();

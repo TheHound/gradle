@@ -106,11 +106,15 @@ public class Maven2Gradle {
             repositoriesForProjects(allProjects, conventionPluginBuilder);
             globalExclusions(rootProject, conventionPluginBuilder);
 
+            declareDependencyConstraints(rootProject, conventionPluginBuilder);
+            
+            MavenManagedDependencies managedDependencies = MavenManagedDependencies.createFor(rootProject);
+            
             List<Dependency> commonDeps = dependencies.get(rootProject.getArtifactId());
-            declareDependencies(commonDeps, conventionPluginBuilder);
+            declareDependencies(commonDeps, conventionPluginBuilder, managedDependencies);
             testNg(commonDeps, conventionPluginBuilder);
             configurePublishing(conventionPluginBuilder, packagesSources(rootProject), false, false);
-
+            
             conventionPluginBuilder.create(workingDir).generate();
 
             for (MavenProject module : modules(allProjects, false)) {
@@ -133,7 +137,7 @@ public class Maven2Gradle {
                 }
 
                 descriptionForProject(module, moduleScriptBuilder);
-                declareDependencies(moduleDependencies, moduleScriptBuilder);
+                declareDependencies(moduleDependencies, moduleScriptBuilder, managedDependencies);
                 testNg(moduleDependencies, moduleScriptBuilder);
 
                 if (packageTests(module, moduleScriptBuilder)) {
@@ -170,8 +174,11 @@ public class Maven2Gradle {
                 scriptBuilder.repositories().maven(null, repo);
             }
 
+            declareDependencyConstraints(rootProject, scriptBuilder);
+            
+            MavenManagedDependencies managedDependencies = MavenManagedDependencies.createFor(rootProject);
             List<Dependency> dependencies = getDependencies(this.rootProject, null);
-            declareDependencies(dependencies, scriptBuilder);
+            declareDependencies(dependencies, scriptBuilder, managedDependencies);
             testNg(dependencies, scriptBuilder);
 
             scriptBuilder.create(workingDir).generate();
@@ -196,15 +203,75 @@ public class Maven2Gradle {
             }
         });
     }
+    
+    private void declareDependencyConstraints(MavenProject rootProject, BuildScriptBuilder builder) {
+        if (rootProject.getDependencyManagement() == null) {
+            return;
+        }
+        CollectedMavenDependencies mvnDeps = new CollectedMavenDependencies();
 
-    private void declareDependencies(List<Dependency> dependencies, BuildScriptBuilder builder) {
+        for(org.apache.maven.model.Dependency mavenDependency : rootProject.getOriginalModel().getDependencyManagement().getDependencies()) {
+            String scope = StringUtils.isNotEmpty(mavenDependency.getScope()) ? mavenDependency.getScope() : "compile";
+            switch (scope) {
+                case "compile":
+                    mvnDeps.compileTimeScope.add(mavenDependency);
+                    break;
+                case "test":
+                    mvnDeps.testScope.add(mavenDependency);
+                    break;
+                case "provided":
+                    mvnDeps.providedScope.add(mavenDependency);
+                    break;
+                case "runtime":
+                    mvnDeps.runtimeScope.add(mavenDependency);
+                    break;
+                case "system":
+                    mvnDeps.systemScope.add(mavenDependency);
+                    break;
+                case "import":
+                    mvnDeps.importScope.add(mavenDependency);
+                    break;
+            }
+        }
+
+        List<Dependency> gradleDeps = toGradleDeps(rootProject, mvnDeps);
+        DependenciesBuilder dependenciesBuilder = builder.dependencies();
+        for (Dependency dep : gradleDeps) {
+            if (dep instanceof ProjectDependency) {
+                dependenciesBuilder.dependencyConstraint(dep.getConfiguration(), null, ((ProjectDependency) dep).getProjectPath());
+            } else if (dep instanceof ExternalDependency){
+                ExternalDependency extDep = (ExternalDependency) dep;
+                String depExpr = extDep.getGroupId() + ":" + extDep.getModule() + ":" + extDep.getVersion();
+                if (StringUtils.isNotEmpty(extDep.getClassifier())) {
+                    depExpr = depExpr + ":" + extDep.getClassifier();
+                }
+                dependenciesBuilder.dependencyConstraint(dep.getConfiguration(), null, depExpr);
+            } else if (dep instanceof ExternalBomDependency) {
+                ExternalBomDependency extDep = (ExternalBomDependency) dep;
+                String depExpr = extDep.getGroupId() + ":" + extDep.getModule() + ":" + extDep.getVersion();
+                if (StringUtils.isNotEmpty(extDep.getClassifier())) {
+                    depExpr = depExpr + ":" + extDep.getClassifier();
+                }
+                dependenciesBuilder.platformDependency(dep.getConfiguration(), null, depExpr);
+            }
+        }
+    }
+
+    private void declareDependencies(List<Dependency> dependencies, BuildScriptBuilder builder, MavenManagedDependencies managedDependencies) {
         DependenciesBuilder dependenciesBuilder = builder.dependencies();
         for (Dependency dep : dependencies) {
             if (dep instanceof ProjectDependency) {
                 dependenciesBuilder.projectDependency(dep.getConfiguration(), null, ((ProjectDependency) dep).getProjectPath());
             } else {
                 ExternalDependency extDep = (ExternalDependency) dep;
-                dependenciesBuilder.dependency(dep.getConfiguration(), null, extDep.getGroupId() + ":" + extDep.getModule() + ":" + extDep.getVersion());
+                String depExpr = extDep.getGroupId() + ":" + extDep.getModule();
+                if (managedDependencies == null || !managedDependencies.isManaged(dep)) {
+                    depExpr= depExpr + ":" + extDep.getVersion();
+                }
+                if (extDep.getClassifier() != null) {
+                    depExpr = depExpr + ":" + extDep.getClassifier();
+                }
+                dependenciesBuilder.dependency(dep.getConfiguration(), null, depExpr);
             }
         }
     }
@@ -314,13 +381,8 @@ public class Maven2Gradle {
         List<org.apache.maven.model.Dependency> dependencies = new ArrayList<>();
         collectAllDependencies(project, dependencies);
 
-        boolean war = "war".equals(project.getPackaging());
 
-        List<org.apache.maven.model.Dependency> compileTimeScope = new ArrayList<>();
-        List<org.apache.maven.model.Dependency> runtimeScope = new ArrayList<>();
-        List<org.apache.maven.model.Dependency> testScope = new ArrayList<>();
-        List<org.apache.maven.model.Dependency> providedScope = new ArrayList<>();
-        List<org.apache.maven.model.Dependency> systemScope = new ArrayList<>();
+        CollectedMavenDependencies mvnDeps = new CollectedMavenDependencies();
 
         //cleanup duplicates from parent
         for(org.apache.maven.model.Dependency mavenDependency : dependencies) {
@@ -328,54 +390,66 @@ public class Maven2Gradle {
                 String scope = StringUtils.isNotEmpty(mavenDependency.getScope()) ? mavenDependency.getScope() : "compile";
                 switch (scope) {
                     case "compile":
-                        compileTimeScope.add(mavenDependency);
+                        mvnDeps.compileTimeScope.add(mavenDependency);
                         break;
                     case "test":
-                        testScope.add(mavenDependency);
+                        mvnDeps.testScope.add(mavenDependency);
                         break;
                     case "provided":
-                        providedScope.add(mavenDependency);
+                        mvnDeps.providedScope.add(mavenDependency);
                         break;
                     case "runtime":
-                        runtimeScope.add(mavenDependency);
+                        mvnDeps.runtimeScope.add(mavenDependency);
                         break;
                     case "system":
-                        systemScope.add(mavenDependency);
+                        mvnDeps.systemScope.add(mavenDependency);
                         break;
                 }
             }
         }
 
+        return toGradleDeps(project, mvnDeps);
+    }
+
+    private List<Dependency> toGradleDeps(MavenProject project, CollectedMavenDependencies mvnDeps) {
+        boolean war = "war".equals(project.getPackaging());
         List<Dependency> result = new ArrayList<>();
-        if (!compileTimeScope.isEmpty() || !runtimeScope.isEmpty() || !testScope.isEmpty() || !providedScope.isEmpty() || !systemScope.isEmpty()) {
-            if (!compileTimeScope.isEmpty()) {
-                for (org.apache.maven.model.Dependency dep : compileTimeScope) {
+        if (!mvnDeps.compileTimeScope.isEmpty() || !mvnDeps.runtimeScope.isEmpty() || !mvnDeps.testScope.isEmpty() || !mvnDeps.providedScope.isEmpty() || !mvnDeps.systemScope.isEmpty() || !mvnDeps.importScope.isEmpty()) {
+            if (!mvnDeps.compileTimeScope.isEmpty()) {
+                for (org.apache.maven.model.Dependency dep : mvnDeps.compileTimeScope) {
                     createGradleDep("api", result, dep, war);
                 }
             }
-            if (!runtimeScope.isEmpty()) {
-                for (org.apache.maven.model.Dependency dep : runtimeScope) {
+            if (!mvnDeps.runtimeScope.isEmpty()) {
+                for (org.apache.maven.model.Dependency dep : mvnDeps.runtimeScope) {
                     createGradleDep("runtimeOnly", result, dep, war);
                 }
             }
-            if (!testScope.isEmpty()) {
-                for (org.apache.maven.model.Dependency dep : testScope) {
+            if (!mvnDeps.testScope.isEmpty()) {
+                for (org.apache.maven.model.Dependency dep : mvnDeps.testScope) {
                     createGradleDep("testImplementation", result, dep, war);
                 }
             }
-            if (!providedScope.isEmpty()) {
-                for (org.apache.maven.model.Dependency dep : providedScope) {
+            if (!mvnDeps.providedScope.isEmpty()) {
+                for (org.apache.maven.model.Dependency dep : mvnDeps.providedScope) {
                     createGradleDep("providedCompile", result, dep, war);
                 }
             }
-            if (!systemScope.isEmpty()) {
-                for (org.apache.maven.model.Dependency dep : systemScope) {
+            if (!mvnDeps.systemScope.isEmpty()) {
+                for (org.apache.maven.model.Dependency dep : mvnDeps.systemScope) {
                     createGradleDep("system", result, dep, war);
+                }
+            }
+            if (!mvnDeps.importScope.isEmpty()) {
+                for (org.apache.maven.model.Dependency dep : mvnDeps.importScope) {
+                    createExternalBomDependency(dep, result);
                 }
             }
         }
         return result;
     }
+
+    
 
     private void collectAllDependencies(MavenProject mavenProject, List<org.apache.maven.model.Dependency> dependencies) {
         if (mavenProject.getParent() != null) {
@@ -402,7 +476,7 @@ public class Maven2Gradle {
             createExternalDependency(mavenDependency, result, scope);
         }
     }
-
+    
     private void compilerSettings(MavenProject project, BuildScriptBuilder builder) {
         String source = "1.8";
         String target = "1.8";
@@ -530,6 +604,14 @@ public class Maven2Gradle {
         List<String> exclusions = mavenDependency.getExclusions().stream().map(Exclusion::getArtifactId).collect(Collectors.toList());
         result.add(new ExternalDependency(scope, mavenDependency.getGroupId(), mavenDependency.getArtifactId(), mavenDependency.getVersion(), classifier, exclusions));
     }
+    
+    private void createExternalBomDependency(org.apache.maven.model.Dependency mavenDependency, List<Dependency> result) {
+        String classifier = mavenDependency.getClassifier();
+        List<String> exclusions = mavenDependency.getExclusions().stream().map(Exclusion::getArtifactId).collect(Collectors.toList());
+        result.add(new ExternalBomDependency("api", mavenDependency.getGroupId(), mavenDependency.getArtifactId(), mavenDependency.getVersion(), classifier, exclusions));
+        
+    }
+
 
     private void createProjectDependency(MavenProject projectDep, List<Dependency> result, String scope, Set<MavenProject> allProjects) {
         if ("war".equals(projectDep.getPackaging())) {
@@ -538,4 +620,12 @@ public class Maven2Gradle {
         result.add(new ProjectDependency(scope, fqn(projectDep, allProjects)));
     }
 
+    private static class CollectedMavenDependencies {
+        List<org.apache.maven.model.Dependency> compileTimeScope = new ArrayList<>();
+        List<org.apache.maven.model.Dependency> runtimeScope = new ArrayList<>();
+        List<org.apache.maven.model.Dependency> testScope = new ArrayList<>();
+        List<org.apache.maven.model.Dependency> providedScope = new ArrayList<>();
+        List<org.apache.maven.model.Dependency> systemScope = new ArrayList<>();
+        List<org.apache.maven.model.Dependency> importScope = new ArrayList<>();
+    }
 }

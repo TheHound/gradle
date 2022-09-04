@@ -87,6 +87,14 @@ java {
 java {
     withJavadocJar()
 }'''))
+
+        implSubprojectBuildFile.text.contains(TextUtil.toPlatformLineSeparators('''
+dependencies {
+    constraints {
+        testImplementation 'junit:junit:4.13.1'
+    }
+}
+'''))
         when:
         run 'clean', 'build'
 
